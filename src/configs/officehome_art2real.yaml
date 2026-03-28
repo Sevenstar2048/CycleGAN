@@ -1,0 +1,40 @@
+seed: 42
+device: cuda
+num_workers: 4
+image_size: 224
+batch_size: 32
+num_classes: 65
+
+paths:
+  office_home_root: ./datasets/OfficeHome
+  source_domain: Art
+  target_domain: Real World
+  checkpoints: ./checkpoints
+  outputs: ./outputs
+
+train:
+  epochs: 20
+  lr: 0.0002
+  weight_decay: 0.0005
+
+task1:
+  cyclegan:
+    epochs: 50
+    lambda_cycle: 10.0
+    lambda_identity: 0.5
+  spectral_cyclegan:
+    epochs: 50
+    beta: 0.01
+
+task2:
+  source_only:
+    epochs: 20
+  cyclegan_aug:
+    epochs: 20
+  spectral_cyclegan_aug:
+    epochs: 20
+  cycada:
+    epochs: 20
+  fda:
+    epochs: 20
+    beta: 0.01

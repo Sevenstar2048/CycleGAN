@@ -1,4 +1,5 @@
 import argparse
+from itertools import cycle
 from pathlib import Path
 
 import torch
@@ -13,6 +14,13 @@ from models.cyclegan import CycleGANCore
 from utils.config import load_config
 from utils.fourier import fda_source_to_target
 from utils.seed import set_seed
+
+
+def _align_batch_size(x_s, x_t):
+    """对齐两个张量的批次大小，取较小者截断。"""
+    batch_s, batch_t = x_s.shape[0], x_t.shape[0]
+    batch_size = min(batch_s, batch_t)
+    return x_s[:batch_size], x_t[:batch_size]
 
 
 def evaluate(model, loader, device):
@@ -55,7 +63,9 @@ def train_classifier(strategy, cfg):
         clf.train()
         total_loss = 0.0
 
-        for (x_s, y_s), (x_t, _) in tqdm(zip(src_loader, tgt_loader), total=min(len(src_loader), len(tgt_loader))):
+        for (x_s, y_s), (x_t, _) in tqdm(zip(cycle(src_loader), tgt_loader), total=len(tgt_loader)):
+            x_s, x_t = _align_batch_size(x_s, x_t)
+            y_s = y_s[:x_s.shape[0]]
             x_s = x_s.to(device)
             y_s = y_s.to(device)
             x_t = x_t.to(device)
@@ -90,7 +100,7 @@ def train_classifier(strategy, cfg):
 
             total_loss += loss.item()
 
-        avg_loss = total_loss / min(len(src_loader), len(tgt_loader))
+        avg_loss = total_loss / len(tgt_loader)
         acc = evaluate(clf, tgt_loader, device)
         print(f"[Task2][{strategy}] Epoch {epoch}/{epochs} - loss: {avg_loss:.4f} - target acc: {acc:.4f}")
 

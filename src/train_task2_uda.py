@@ -25,6 +25,29 @@ def _align_batch_size(x_s, x_t):
     return x_s[:batch_size], x_t[:batch_size]
 
 
+def _resolve_task2_epochs(cfg, strategy: str) -> int:
+    mapping = {
+        "source_only": "source_only",
+        "cyclegan": "cyclegan_aug",
+        "spectral_cyclegan": "spectral_cyclegan_aug",
+        "cycada": "cycada",
+        "fda": "fda",
+    }
+    return cfg["task2"][mapping[strategy]]["epochs"]
+
+
+def _load_task1_translator_weights(cyclegan: CycleGANCore, ckpt_path: str, device: torch.device) -> None:
+    """加载 Task I 训练好的 CycleGAN 生成器权重，避免 Task II 使用随机翻译器。"""
+    if not Path(ckpt_path).exists():
+        raise FileNotFoundError(
+            f"Task I checkpoint not found: {ckpt_path}. "
+            "Please run Task I first or fix checkpoint path in config."
+        )
+
+    state = torch.load(ckpt_path, map_location=device)
+    cyclegan.load_state_dict(state, strict=False)
+
+
 def evaluate(model, loader, device):
     model.eval()
     y_true, y_pred = [], []
@@ -175,8 +198,31 @@ def train_classifier(strategy, cfg):
         cyclegan = CycleGANCore().to(device)
         cyclegan.train()
 
+    if strategy == "cyclegan":
+        assert cyclegan is not None
+        ckpt = cfg["task2"]["cyclegan_aug"].get(
+            "translator_ckpt",
+            str(Path(cfg["paths"]["checkpoints"]) / "task1" / "spatial_cyclegan_art2real.pt"),
+        )
+        _load_task1_translator_weights(cyclegan, ckpt, device)
+        cyclegan.eval()
+
+    if strategy == "spectral_cyclegan":
+        assert cyclegan is not None
+        ckpt = cfg["task2"]["spectral_cyclegan_aug"].get(
+            "translator_ckpt",
+            str(Path(cfg["paths"]["checkpoints"]) / "task1" / "spectral_cyclegan_art2real.pt"),
+        )
+        _load_task1_translator_weights(cyclegan, ckpt, device)
+        cyclegan.eval()
+
     if strategy == "cycada":
         assert cyclegan is not None
+        ckpt = cfg["task2"]["cycada"].get(
+            "translator_ckpt",
+            str(Path(cfg["paths"]["checkpoints"]) / "task1" / "spatial_cyclegan_art2real.pt"),
+        )
+        _load_task1_translator_weights(cyclegan, ckpt, device)
         feat_disc = FeatureDomainDiscriminator(in_dim=clf.feature_dim).to(device)
         optimizer_cyclegan_g = optim.Adam(
             list(cyclegan.g_s2t.parameters()) + list(cyclegan.g_t2s.parameters()),
@@ -194,7 +240,7 @@ def train_classifier(strategy, cfg):
             betas=(0.5, 0.999),
         )
 
-    epochs = cfg["task2"][strategy if strategy != "cyclegan" else "cyclegan_aug"]["epochs"]
+    epochs = _resolve_task2_epochs(cfg, strategy)
 
     for epoch in range(1, epochs + 1):
         clf.train()
@@ -209,12 +255,25 @@ def train_classifier(strategy, cfg):
         total_sem = 0.0
         total_feat_d = 0.0
 
-        for (x_s, y_s), (x_t, _) in tqdm(zip(cycle(src_loader), tgt_loader), total=len(tgt_loader)):
-            x_s, x_t = _align_batch_size(x_s, x_t)
-            y_s = y_s[:x_s.shape[0]]
+        if strategy == "source_only":
+            iterator = ((batch, None) for batch in src_loader)
+            total_steps = len(src_loader)
+        else:
+            iterator = zip(cycle(src_loader), tgt_loader)
+            total_steps = len(tgt_loader)
+
+        for src_batch, tgt_batch in tqdm(iterator, total=total_steps):
+            x_s, y_s = src_batch
             x_s = x_s.to(device)
             y_s = y_s.to(device)
-            x_t = x_t.to(device)
+
+            if tgt_batch is not None:
+                x_t = tgt_batch[0]
+                x_s, x_t = _align_batch_size(x_s, x_t)
+                y_s = y_s[:x_s.shape[0]]
+                x_t = x_t.to(device)
+            else:
+                x_t = None
 
             if strategy == "source_only":
                 x_in = x_s
@@ -225,9 +284,9 @@ def train_classifier(strategy, cfg):
             elif strategy == "spectral_cyclegan":
                 assert cyclegan is not None
                 with torch.no_grad():
-                    x_s_fda = fda_source_to_target(x_s, x_t, beta=cfg["task1"]["spectral_cyclegan"]["beta"])
-                    x_in = cyclegan.g_s2t(x_s_fda)
+                    x_in = cyclegan.g_s2t(x_s)
             elif strategy == "fda":
+                assert x_t is not None
                 x_in = fda_source_to_target(x_s, x_t, beta=cfg["task2"]["fda"]["beta"])
             elif strategy == "cycada":
                 assert cyclegan is not None
@@ -235,6 +294,7 @@ def train_classifier(strategy, cfg):
                 assert optimizer_cyclegan_g is not None
                 assert optimizer_cyclegan_d is not None
                 assert optimizer_feat_d is not None
+                assert x_t is not None
                 losses = train_one_step_cycada(
                     clf=clf,
                     cyclegan=cyclegan,
@@ -267,14 +327,14 @@ def train_classifier(strategy, cfg):
 
             total_loss += loss.item()
 
-        avg_loss = total_loss / len(tgt_loader)
+        avg_loss = total_loss / total_steps
         acc = evaluate(clf, tgt_loader, device)
         if strategy == "cycada":
             print(
                 f"[Task2][{strategy}] Epoch {epoch}/{epochs} - "
-                f"loss_total: {avg_loss:.4f} - task: {total_task / len(tgt_loader):.4f} - "
-                f"img_g: {total_img_g / len(tgt_loader):.4f} - img_d: {total_img_d / len(tgt_loader):.4f} - "
-                f"sem: {total_sem / len(tgt_loader):.4f} - feat_d: {total_feat_d / len(tgt_loader):.4f} - "
+                f"loss_total: {avg_loss:.4f} - task: {total_task / total_steps:.4f} - "
+                f"img_g: {total_img_g / total_steps:.4f} - img_d: {total_img_d / total_steps:.4f} - "
+                f"sem: {total_sem / total_steps:.4f} - feat_d: {total_feat_d / total_steps:.4f} - "
                 f"target acc: {acc:.4f}"
             )
         else:

@@ -35,6 +35,14 @@ task2:
     epochs: 20
   cycada:
     epochs: 20
+    lr_g: 0.0002
+    lr_d: 0.0002
+    lr_feat_d: 0.0002
+    lambda_image_adv: 1.0
+    lambda_cycle: 10.0
+    lambda_identity: 5.0
+    lambda_semantic: 1.0
+    lambda_feature_adv: 0.1
   fda:
     epochs: 20
     beta: 0.01
